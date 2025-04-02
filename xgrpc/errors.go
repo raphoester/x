@@ -40,8 +40,9 @@ func StreamErrorTransformer() grpc.StreamServerInterceptor {
 }
 
 var errorMatches = map[error]codes.Code{
-	xerrs.ErrNotFound: codes.NotFound,
-	xerrs.ErrConflict: codes.AlreadyExists,
+	xerrs.ErrNotFound:  codes.NotFound,
+	xerrs.ErrConflict:  codes.AlreadyExists,
+	xerrs.ErrForbidden: codes.PermissionDenied,
 }
 
 func transformError(err error) error {

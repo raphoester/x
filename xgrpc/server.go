@@ -20,3 +20,9 @@ func RegisterReflectionIfNeeded(config ServerConfig, server *grpc.Server) {
 		reflection.Register(server)
 	}
 }
+
+type Registrar func(srv *grpc.Server)
+
+type Registrable interface {
+	Registrar() Registrar
+}

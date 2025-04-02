@@ -93,17 +93,22 @@ func (t *envTree) applyRec(currentPath string, value reflect.Value, retErr error
 	if typeVal.Kind() == reflect.Struct {
 		for i := 0; i < typeVal.NumField(); i++ {
 			field := typeVal.Field(i)
+			yamlTag, hasTag := field.Tag.Lookup("yaml")
+			if hasTag && yamlTag == ",inline" {
+				// For inlined fields, recurse with the same currentPath
+				retErr = t.applyRec(currentPath, value.Field(i), retErr)
+				continue
+			}
+
 			var nextPath string
-			if t, ok := field.Tag.Lookup("yaml"); ok {
-				nextPath = strings.ToUpper(t)
+			if hasTag {
+				nextPath = strings.ToUpper(yamlTag)
 			} else {
 				nextPath = strings.ToUpper(field.Name)
 			}
-
 			if len(currentPath) != 0 {
 				nextPath = fmt.Sprintf("%s_%s", currentPath, nextPath)
 			}
-
 			retErr = t.applyRec(nextPath, value.Field(i), retErr)
 		}
 	}

@@ -6,25 +6,29 @@ import (
 
 	"github.com/raphoester/x/xevents"
 	"github.com/raphoester/x/xmongo"
+	"github.com/raphoester/x/xmongo/mongo_versionning"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-type Aggregate interface {
-	Collect() []xevents.Event
+type Aggregate[S any] interface {
+	Collect() []*xevents.Event
+	mongo_versionning.Aggregate[S]
 }
 
-type SaveFunc[T Aggregate] func(context.Context, *mongo.Collection, T) error
-
-func SaveAggregate[T Aggregate](
+func SaveAggregate[S any, EA Aggregate[S]](
 	ctx context.Context,
 	collection *mongo.Collection,
-	aggregate T,
-	saveFunc SaveFunc[T],
+	aggregate EA,
 ) error {
 	ev := aggregate.Collect()
 	db := collection.Database()
 
+	modified := aggregate.Modified()
+
+	// use a transaction if the aggregate has events:
+	// - if the aggregate is modified, need to update both in an atomic way
+	// - if the aggregate is not modified, need to check for version conflicts before saving the events
 	tx := xmongo.NopTX
 	if len(ev) > 0 {
 		tx = func(ctx context.Context, fn func(ctx2 context.Context) (interface{}, error), _ ...*options.TransactionOptions) (interface{}, error) {
@@ -39,21 +43,34 @@ func SaveAggregate[T Aggregate](
 		}
 	}
 
-	_, err := tx(ctx, func(ctx2 context.Context) (interface{}, error) {
-		if len(ev) > 0 {
-			if err := SaveEvents(ctx2, db, ev); err != nil {
-				return nil, fmt.Errorf("failed to save events: %w", err)
-			}
+	saveFn := func(ctx context.Context) (interface{}, error) {
+		if err := mongo_versionning.Upsert(ctx, collection, aggregate); err != nil {
+			return nil, fmt.Errorf("failed to upsert aggregate: %w", err)
 		}
 
-		if err := saveFunc(ctx2, collection, aggregate); err != nil {
-			return nil, fmt.Errorf("failed to save aggregate: %w", err)
+		if err := SaveEvents(ctx, db, ev); err != nil {
+			return nil, fmt.Errorf("failed to save events: %w", err)
 		}
 
 		return nil, nil
-	})
+	}
 
-	if err != nil {
+	if !modified && len(ev) > 0 { // do not allow the aggregate's events to be saved if the corresponding version is conflicting
+		saveFn = func(ctx context.Context) (interface{}, error) {
+			if err := SaveEvents(ctx, db, ev); err != nil {
+				return nil, fmt.Errorf("failed to save events: %w", err)
+			}
+
+			// check if the version is conflicting
+			if err := mongo_versionning.AssertVersion(ctx, collection, aggregate.Loaded(), aggregate.ID()); err != nil {
+				return nil, fmt.Errorf("failed to assert version: %w", err)
+			}
+
+			return nil, nil
+		}
+	}
+
+	if _, err := tx(ctx, saveFn); err != nil {
 		return fmt.Errorf("failed to save aggregate with its events: %w", err)
 	}
 

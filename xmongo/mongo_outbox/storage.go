@@ -12,45 +12,71 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
-func NewStorageFromClient(client *mongo.Client, databaseName string) *Storage {
+func NewStorage(client *mongo.Client) *Storage {
 	return &Storage{
-		database: client.Database(databaseName),
+		collection: obtainCollection(client),
 	}
 }
 
-func NewStorage(db *mongo.Database) *Storage {
-	return &Storage{database: db}
+func NewStorageFromDB(db *mongo.Database) *Storage {
+	return &Storage{collection: obtainCollection(db.Client())}
 }
 
 type Storage struct {
-	database *mongo.Database
+	collection *mongo.Collection
 }
 
-func (s *Storage) GetPendingEvents(ctx context.Context) ([]xevents.Event, error) {
-	return FindAllEvents(context.Background(), s.database)
+func (s *Storage) GetPending(ctx context.Context) ([]*xevents.Event, error) {
+	return findAllEvents(ctx, s.collection)
 }
 
 func (s *Storage) MarkAsPublished(ctx context.Context, id string) error {
-	return MarkAsPublished(ctx, s.database, id)
+	return markAsPublished(ctx, s.collection, id)
 }
 
-const outboxEventsCollectionName = "OutboxEvents"
+func (s *Storage) Save(ctx context.Context, events ...*xevents.Event) error {
+	return saveEvents(ctx, s.collection, events)
+}
+
+// this is not ideal because the database/collection names should be configurable
+
+const outboxEventsCollectionName = "Events"
+const outboxEventsDatabaseName = "Outbox"
+
+func obtainCollection(client *mongo.Client) *mongo.Collection {
+	return client.Database(outboxEventsDatabaseName).Collection(outboxEventsCollectionName)
+}
 
 func MarkAsPublished(ctx context.Context, db *mongo.Database, id string) error {
-	res, err := db.Collection(outboxEventsCollectionName).DeleteOne(ctx, bson.M{"_id": id})
+	return markAsPublished(ctx, obtainCollection(db.Client()), id)
+}
+
+func markAsPublished(ctx context.Context, collection *mongo.Collection, id string) error {
+	res, err := collection.UpdateOne(ctx,
+		bson.M{"_id": id},
+		bson.M{
+			"$set": bson.M{"published_at": time.Now()},
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("failed to delete event with ID %q: %w", id, err)
 	}
 
-	if res.DeletedCount == 0 {
+	if res.ModifiedCount == 0 {
 		return xerrs.ErrNotFound
 	}
 
 	return nil
 }
 
-func SaveEvents(ctx context.Context, db *mongo.Database, events []xevents.Event) error {
-	collection := db.Collection(outboxEventsCollectionName)
+func SaveEvents(ctx context.Context, db *mongo.Database, events []*xevents.Event) error {
+	return saveEvents(ctx, obtainCollection(db.Client()), events)
+}
+
+func saveEvents(ctx context.Context, collection *mongo.Collection, events []*xevents.Event) error {
+	if len(events) == 0 {
+		return nil
+	}
 
 	daos, err := EventsToDAOs(events)
 	if err != nil {
@@ -58,21 +84,26 @@ func SaveEvents(ctx context.Context, db *mongo.Database, events []xevents.Event)
 	}
 
 	if _, err := collection.InsertMany(ctx, daos); err != nil {
-		return err
+		return fmt.Errorf("failed to insert events: %w", err)
 	}
 
 	return nil
 }
 
-func FindAllEvents(ctx context.Context, db *mongo.Database) ([]xevents.Event, error) {
-	collection := db.Collection(outboxEventsCollectionName)
+func FindAllEvents(ctx context.Context, db *mongo.Database) ([]*xevents.Event, error) {
+	return findAllEvents(ctx, obtainCollection(db.Client()))
+}
 
-	cursor, err := collection.Find(ctx, bson.M{})
+func findAllEvents(ctx context.Context, collection *mongo.Collection) ([]*xevents.Event, error) {
+
+	cursor, err := collection.Find(ctx, bson.M{
+		"published_at": bson.M{"$exists": false},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to find all events: %w", err)
 	}
 
-	var daos []EventDAO
+	var daos []*EventDAO
 	if err := cursor.All(ctx, &daos); err != nil {
 		return nil, fmt.Errorf("failed to decode all events: %w", err)
 	}
@@ -86,7 +117,10 @@ func FindAllEvents(ctx context.Context, db *mongo.Database) ([]xevents.Event, er
 }
 
 func GetEventByID(ctx context.Context, db *mongo.Database, id string) (*xevents.Event, error) {
-	collection := db.Collection(outboxEventsCollectionName)
+	return getEventByID(ctx, obtainCollection(db.Client()), id)
+}
+
+func getEventByID(ctx context.Context, collection *mongo.Collection, id string) (*xevents.Event, error) {
 
 	filter := map[string]string{"_id": id}
 	res := collection.FindOne(ctx, filter)
@@ -94,8 +128,8 @@ func GetEventByID(ctx context.Context, db *mongo.Database, id string) (*xevents.
 		return nil, fmt.Errorf("failed to find event with ID %q: %w", id, err)
 	}
 
-	var dao EventDAO
-	if err := res.Decode(&dao); err != nil {
+	dao := &EventDAO{}
+	if err := res.Decode(dao); err != nil {
 		return nil, fmt.Errorf("failed to decode event with ID %q: %w", id, err)
 	}
 
@@ -114,7 +148,7 @@ type EventDAO struct {
 	Payload   payloadMap
 }
 
-func EventToDAO(event xevents.Event) (*EventDAO, error) {
+func EventToDAO(event *xevents.Event) (*EventDAO, error) {
 	eventData := event.Data()
 	payload := payloadMap{}
 
@@ -136,7 +170,7 @@ func (p payloadMap) marshalJSON() ([]byte, error) {
 	return json.Marshal(p)
 }
 
-func EventsToDAOs(events []xevents.Event) ([]any, error) {
+func EventsToDAOs(events []*xevents.Event) ([]any, error) {
 	var eventDAOs []any
 	for _, event := range events {
 		eventDAO, err := EventToDAO(event)
@@ -148,7 +182,7 @@ func EventsToDAOs(events []xevents.Event) ([]any, error) {
 	return eventDAOs, nil
 }
 
-func DAOToEvent(dao EventDAO) (*xevents.Event, error) {
+func DAOToEvent(dao *EventDAO) (*xevents.Event, error) {
 	if dao.ID == "" {
 		return nil, fmt.Errorf("id is empty")
 	}
@@ -164,17 +198,17 @@ func DAOToEvent(dao EventDAO) (*xevents.Event, error) {
 	}
 
 	restored := xevents.Restore(dao.ID, dao.CreatedAt, dao.Topic, payload)
-	return &restored, nil
+	return restored, nil
 }
 
-func DAOsToEvents(daos []EventDAO) ([]xevents.Event, error) {
-	var events []xevents.Event
+func DAOsToEvents(daos []*EventDAO) ([]*xevents.Event, error) {
+	var events []*xevents.Event
 	for _, dao := range daos {
 		event, err := DAOToEvent(dao)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert dao with id %q to event: %w", dao.ID, err)
 		}
-		events = append(events, *event)
+		events = append(events, event)
 	}
 	return events, nil
 }

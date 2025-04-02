@@ -23,7 +23,24 @@ func (r *RabbitMQ) Destroy() error {
 	return r.pool.Purge(r.container)
 }
 
+// Clean makes sure that the RabbitMQ is clean and ready for one new test.
+//
+// TODO: This is extremely long, but I haven't found a way to clean the RabbitMQ properly and the tests fail without a fresh instance.
+// Should probably not destroy the container and just purge every queue.
 func (r *RabbitMQ) Clean() error {
+	if err := r.Destroy(); err != nil {
+		return fmt.Errorf("failed to destroy rabbitmq: %w", err)
+	}
+
+	newR, err := NewRabbitMQ(r.logger)
+	if err != nil {
+		return fmt.Errorf("failed to create new rabbitmq: %w", err)
+	}
+
+	r.RabbitMQ = newR.RabbitMQ
+	r.container = newR.container
+	r.pool = newR.pool
+
 	return nil
 }
 

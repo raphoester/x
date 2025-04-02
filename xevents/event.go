@@ -3,6 +3,7 @@ package xevents
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -14,34 +15,22 @@ func New(
 	timeProvider xtime.Provider,
 	idGenerator xid.Generator,
 	p Payload,
-) Event {
-	return Event{
+) (*Event, error) {
+	if !p.IsValid() {
+		return nil, errors.New("invalid payload")
+	}
+	return &Event{
 		content: EventData{
 			ID:        idGenerator.Generate(),
 			CreatedAt: timeProvider.Now(),
 			Topic:     p.Topic(),
 			Payload:   p,
 		},
-	}
+	}, nil
 }
 
 type Event struct {
 	content EventData
-}
-
-func (e Event) ArbitraryStringProp(key string) (string, error) {
-	rcv := map[string]interface{}{}
-	if err := e.UnmarshalPayload(&rcv); err != nil {
-		return "", fmt.Errorf("failed unmarshalling payload: %w", err)
-
-	}
-
-	value, ok := rcv[key]
-	if !ok {
-		return "", fmt.Errorf("key %q not found in payload", key)
-	}
-
-	return fmt.Sprint(value), nil
 }
 
 // Restore offers a way to recreate an Event from its raw data.
@@ -54,8 +43,8 @@ func Restore(
 	createdAt time.Time,
 	topic string,
 	payload any,
-) Event {
-	return Event{
+) *Event {
+	return &Event{
 		content: EventData{
 			ID:        id,
 			CreatedAt: createdAt,
@@ -65,7 +54,7 @@ func Restore(
 	}
 }
 
-func (e Event) Data() EventData {
+func (e *Event) Data() EventData {
 	return e.content
 }
 
@@ -81,11 +70,11 @@ type Payload interface {
 	IsValid() bool
 }
 
-func (e Event) MarshalPayload() ([]byte, error) {
+func (e *Event) MarshalPayload() ([]byte, error) {
 	return json.Marshal(e.content.Payload)
 }
 
-func (e Event) UnmarshalPayload(to any) error {
+func (e *Event) UnmarshalPayload(to any) error {
 	b, ok := e.content.Payload.([]byte)
 	if ok {
 		if err := json.Unmarshal(b, &to); err != nil {
@@ -107,5 +96,15 @@ func (e Event) UnmarshalPayload(to any) error {
 }
 
 type Publisher interface {
-	Publish(ctx context.Context, event Event) error
+	Publish(ctx context.Context, event *Event) error
 }
+
+type Listener interface {
+	Listen(ctx context.Context, identifier string, routingKeys []string, pairs ...HandlerPair) error
+}
+
+type HandlerPair struct {
+	Topic   string
+	Handler Handler
+}
+type Handler func(ctx context.Context, event *Event) error

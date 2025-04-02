@@ -38,7 +38,9 @@ func (c *Connection) Connect() error {
 		return nil
 	}
 
-	conn, err := amqp091.Dial(c.url)
+	conn, err := amqp091.DialConfig(c.url, amqp091.Config{
+		Heartbeat: 10 * time.Second,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to dial server: %w", err)
 	}

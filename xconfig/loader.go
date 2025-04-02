@@ -51,7 +51,6 @@ func (l *ConfigLoader) ApplyConfig(rcv Config) error {
 	rcv.ResetToDefault()
 
 	var retErr error
-
 	for _, s := range l.sa {
 		if err := ApplyYamlFile(rcv, s); err != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("failed to override config with yaml: %w", err))

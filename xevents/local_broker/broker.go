@@ -11,7 +11,7 @@ import (
 
 type Broker struct {
 	mu          sync.Mutex
-	subscribers map[string][]subscriber
+	subscribers []subscriber
 	quit        chan struct{}
 	closed      bool
 	logger      xlog.Logger
@@ -19,17 +19,18 @@ type Broker struct {
 
 func New(logger xlog.Logger) *Broker {
 	return &Broker{
-		subscribers: make(map[string][]subscriber),
+		subscribers: make([]subscriber, 0),
 		quit:        make(chan struct{}),
 		logger:      logger,
 	}
 }
 
 type subscriber struct {
-	channel chan xevents.Event
+	ctx      context.Context
+	handlers map[string]xevents.Handler
 }
 
-func (b *Broker) Publish(_ context.Context, event xevents.Event) error {
+func (b *Broker) Publish(_ context.Context, event *xevents.Event) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -39,20 +40,33 @@ func (b *Broker) Publish(_ context.Context, event xevents.Event) error {
 
 	b.logger.Debug("publishing event",
 		lf.String("topic", event.Data().Topic),
-		lf.Int("subscriber_count", len(b.subscribers[event.Data().Topic])),
 	)
 
-	for i, sub := range b.subscribers[event.Data().Topic] {
+	for i, sub := range b.subscribers {
+		handler, ok := sub.handlers[event.Data().Topic]
+		if !ok {
+			continue
+		}
+
 		b.logger.Debug("sending event",
 			lf.String("topic", event.Data().Topic),
 			lf.Int("subscriber_index", i),
 		)
-		go func() { sub.channel <- event }() // avoid blocking all receivers if one is slow
+
+		go func() {
+			err := handler(sub.ctx, event)
+			if err != nil {
+				b.logger.Error("failed to handle event",
+					lf.String("topic", event.Data().Topic),
+					lf.Err(err),
+				)
+			}
+		}()
 	}
 	return nil
 }
 
-func (b *Broker) Subscribe(topic string) <-chan xevents.Event {
+func (b *Broker) Listen(ctx context.Context, identifier string, routingKeys []string, pairs ...xevents.HandlerPair) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -60,37 +74,31 @@ func (b *Broker) Subscribe(topic string) <-chan xevents.Event {
 		return nil
 	}
 
-	ch := make(chan xevents.Event)
-	b.subscribers[topic] = append(
-		b.subscribers[topic],
-		subscriber{
-			channel: ch,
-		},
+	if len(pairs) == 0 {
+		return nil
+	}
+
+	if len(routingKeys) == 0 {
+		return nil
+	}
+
+	handlerMap := make(map[string]xevents.Handler)
+	for _, pair := range pairs {
+		handlerMap[pair.Topic] = pair.Handler
+	}
+
+	sub := subscriber{
+		ctx:      ctx,
+		handlers: handlerMap,
+	}
+
+	b.subscribers = append(b.subscribers, sub)
+	b.logger.Debug("subscribed to topics",
+		lf.String("identifier", identifier),
+		lf.Strings("routingKeys", routingKeys),
 	)
 
-	return ch
-}
-
-func (b *Broker) Unsubscribe(topic string, ch <-chan xevents.Event) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if b.closed {
-		return
-	}
-
-	index := -1
-	for i, sub := range b.subscribers[topic] {
-		if sub.channel == ch {
-			index = i
-			break
-		}
-	}
-
-	if index != -1 {
-		close(b.subscribers[topic][index].channel)
-		b.subscribers[topic] = append(b.subscribers[topic][:index], b.subscribers[topic][index+1:]...)
-	}
+	return nil
 }
 
 func (b *Broker) Close() error {
@@ -103,12 +111,6 @@ func (b *Broker) Close() error {
 
 	b.closed = true
 	close(b.quit)
-
-	for _, ch := range b.subscribers {
-		for _, sub := range ch {
-			close(sub.channel)
-		}
-	}
 
 	return nil
 }

@@ -8,25 +8,26 @@ import (
 
 	"github.com/rabbitmq/amqp091-go"
 	"github.com/raphoester/x/xevents"
-	"github.com/raphoester/x/xid"
+	"github.com/raphoester/x/xlog"
+	"github.com/raphoester/x/xlog/lf"
 	"github.com/raphoester/x/xrabbitmq"
 )
 
-func New(client *xrabbitmq.Client) (*Broker, error) {
+func New(client *xrabbitmq.Client, logger xlog.Logger) (*Broker, error) {
 	return &Broker{
 		rabbitMQ:       client,
-		idGenerator:    xid.RandomGenerator{},
+		logger:         logger,
 		consumersCount: runtime.GOMAXPROCS(0),
 	}, nil
 }
 
 type Broker struct {
 	rabbitMQ       *xrabbitmq.Client
-	idGenerator    xid.Generator
+	logger         xlog.Logger
 	consumersCount int
 }
 
-func (b *Broker) Publish(ctx context.Context, event xevents.Event) error {
+func (b *Broker) Publish(ctx context.Context, event *xevents.Event) error {
 	marshaledPayload, err := event.MarshalPayload()
 	if err != nil {
 		return fmt.Errorf("failed to marshal event payload: %w", err)
@@ -45,27 +46,16 @@ func (b *Broker) Publish(ctx context.Context, event xevents.Event) error {
 	return nil
 }
 
-type HandlerPair struct {
-	Topic   string
-	Handler Handler
-}
-
-type Handler func(ctx context.Context, event xevents.Event) error
-
-func (b *Broker) Listen(
-	ctx context.Context,
-	routingKeys []string,
-	pairs ...HandlerPair,
-) (chan struct{}, error) {
+func (b *Broker) Listen(ctx context.Context, identifier string, routingKeys []string, pairs ...xevents.HandlerPair) error {
 	if len(pairs) == 0 {
-		return nil, errors.New("cannot listen without any handler pairs")
+		return errors.New("cannot listen without any handler pairs")
 	}
 
 	if len(routingKeys) == 0 {
-		return nil, errors.New("cannot listen without any routing keys")
+		return errors.New("cannot listen without any routing keys")
 	}
 
-	handlerMap := make(map[string]Handler)
+	handlerMap := make(map[string]xevents.Handler)
 	for _, pair := range pairs {
 		handlerMap[pair.Topic] = pair.Handler
 	}
@@ -74,19 +64,24 @@ func (b *Broker) Listen(
 
 	go b.rabbitMQ.Stream(
 		ctx,
-		b.idGenerator.Generate(),
+		identifier,
 		routingKeys,
 		ready,
 		b.consumersCount,
 		func(ctx context.Context, delivery amqp091.Delivery) error {
 			handler, ok := handlerMap[delivery.RoutingKey]
 			if !ok {
-				return fmt.Errorf("no handler matching topic %q", delivery.RoutingKey)
+				b.logger.Info(
+					"received unprocessable topic, dropping",
+					lf.String("topic", delivery.RoutingKey),
+					lf.String("message_id", delivery.MessageId),
+				)
+				return nil
 			}
 
 			event := xevents.Restore(
 				delivery.MessageId,
-				delivery.Timestamp,
+				delivery.Timestamp.UTC(),
 				delivery.RoutingKey,
 				delivery.Body,
 			)
@@ -99,5 +94,10 @@ func (b *Broker) Listen(
 		},
 	)
 
-	return ready, nil
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-ready:
+		return nil
+	}
 }

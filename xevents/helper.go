@@ -1,11 +1,9 @@
-package rabbitmq_broker
+package xevents
 
 import (
 	"context"
 	"errors"
 	"fmt"
-
-	"github.com/raphoester/x/xevents"
 )
 
 // UnmarshalHelper is a utility function that allows the handler NOT to care about any of the unmarshalling logic.
@@ -24,8 +22,8 @@ import (
 //			),
 //		})
 //	}
-func UnmarshalHelper[P xevents.Payload](fn func(ctx context.Context, event xevents.Event, payload P) error) func(ctx context.Context, event xevents.Event) error {
-	return func(ctx context.Context, event xevents.Event) error {
+func UnmarshalHelper[P Payload](fn func(ctx context.Context, event *Event, payload P) error) func(ctx context.Context, event *Event) error {
+	return func(ctx context.Context, event *Event) error {
 		var payload P
 		if err := event.UnmarshalPayload(&payload); err != nil {
 			return fmt.Errorf("failed unmarshaling payload to %T: %w", payload, err)

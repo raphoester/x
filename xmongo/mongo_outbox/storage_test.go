@@ -17,7 +17,7 @@ import (
 func TestEventConversion(t *testing.T) {
 	timeProvider := xtime.CustomProvider{NowFunc: func() time.Time { return time.Date(2024, time.October, 10, 0, 0, 0, 0, time.UTC) }}
 	idGenerator := xid.CustomGenerator{GenFunc: func() string { return "id" }}
-	event := xevents.New(
+	event, err := xevents.New(
 		timeProvider,
 		idGenerator,
 		&TestPayload{
@@ -30,10 +30,12 @@ func TestEventConversion(t *testing.T) {
 			},
 		})
 
+	require.NoError(t, err)
+
 	dao, err := mongo_outbox.EventToDAO(event)
 	require.NoError(t, err)
 
-	event2, err := mongo_outbox.DAOToEvent(*dao)
+	event2, err := mongo_outbox.DAOToEvent(dao)
 	require.NoError(t, err)
 
 	require.Equal(t, event.Data().Topic, event2.Data().Topic)

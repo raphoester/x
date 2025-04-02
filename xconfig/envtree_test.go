@@ -12,6 +12,7 @@ type testStruct struct {
 	TestInt       int               `yaml:"test_int"`
 	TestStruct    subTestStruct     `yaml:"test_struct"`
 	TestByteArray xconfig.ByteArray `yaml:"test_byte_array"`
+	subTestStruct `yaml:",inline"`
 }
 
 type subTestStruct struct {
@@ -71,6 +72,17 @@ func TestApply(t *testing.T) {
 				TestByteArray: []byte("hello world"),
 			},
 			expectErr: false,
+		}, {
+			name: "inline",
+			envVars: map[string]string{
+				"SUB_STRING": "hello",
+			},
+			input: &testStruct{},
+			expected: &testStruct{
+				subTestStruct: subTestStruct{
+					String: "hello",
+				},
+			},
 		},
 	}
 

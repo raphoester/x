@@ -12,7 +12,7 @@ import (
 )
 
 type Mongo struct {
-	DB        *mongo.Database
+	Client    *mongo.Client
 	container *dockertest.Resource
 	pool      *dockertest.Pool
 }
@@ -23,7 +23,21 @@ func (m *Mongo) Destroy() error {
 }
 
 func (m *Mongo) Clean() error {
-	return m.DB.Drop(context.Background())
+	dbs, err := m.Client.ListDatabaseNames(context.Background(), bson.M{
+		"name": bson.M{"$nin": []string{"admin", "config", "local"}},
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to list databases: %w", err)
+	}
+
+	for _, db := range dbs {
+		if err := m.Client.Database(db).Drop(context.Background()); err != nil {
+			return fmt.Errorf("failed to drop database %s: %w", db, err)
+		}
+	}
+
+	return nil
 }
 
 func NewMongo() (*Mongo, error) {
@@ -50,18 +64,17 @@ func NewMongo() (*Mongo, error) {
 	port := container.GetPort("27017/tcp")
 	uri := fmt.Sprintf("mongodb://localhost:%s/?directConnection=true&serverSelectionTimeoutMS=2000", port)
 
-	var dbClient *mongo.Database
+	var dbClient *mongo.Client
 	if err := pool.Retry(func() error {
-		dbClient, err = xmongo.NewDatabase(context.Background(), xmongo.Config{
-			DSN:          uri,
-			DatabaseName: "root",
+		dbClient, err = xmongo.NewClient(context.Background(), xmongo.ClientConfig{
+			DSN: uri,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to connect to mongo: %w", err)
 		}
 
 		// this is needed for the replicaset mode to work
-		adminDB := dbClient.Client().Database("admin")
+		adminDB := dbClient.Database("admin")
 		initCmd := bson.D{
 			{"replSetInitiate", bson.M{
 				"_id": "rs0",
@@ -86,7 +99,7 @@ func NewMongo() (*Mongo, error) {
 	}
 
 	return &Mongo{
-		DB:        dbClient,
+		Client:    dbClient,
 		container: container,
 		pool:      pool,
 	}, nil

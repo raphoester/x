@@ -58,10 +58,11 @@ func NewClient(
 	}
 
 	return &Client{
-		connection: conn,
-		exchange:   config.ExchangeName,
-		logger:     logger,
-		retryDelay: config.RetryDelay,
+		connection:   conn,
+		exchange:     config.ExchangeName,
+		logger:       logger,
+		activeQueues: make(map[string]struct{}, 1),
+		retryDelay:   config.RetryDelay,
 	}, nil
 }
 
@@ -69,6 +70,9 @@ func NewClient(
 type Client struct {
 	connection *Connection
 	exchange   string
+
+	activeQueues      map[string]struct{}
+	activeQueuesMutex sync.RWMutex
 
 	publishChannel *amqp091.Channel
 	publishMutex   sync.Mutex
@@ -139,7 +143,6 @@ func consumerLoop(
 	identifier int,
 ) {
 	for {
-		logger.Debug("consumer loop start", lf.Int("identifier", identifier))
 		select {
 		case <-stop:
 			logger.Info("consumer loop stop", lf.Int("identifier", identifier))
@@ -152,6 +155,7 @@ func consumerLoop(
 			logger.Warning(
 				"failed to get channel",
 				lf.Int("identifier", identifier),
+				lf.String("queue_name", queueName),
 				lf.Err(err),
 			)
 			time.Sleep(retryDelay)
@@ -161,7 +165,7 @@ func consumerLoop(
 		obtainMsgsChan := func() (<-chan amqp091.Delivery, error) {
 			if _, err := ch.QueueDeclare(
 				queueName,
-				true,
+				false,
 				false,
 				false,
 				false,
@@ -209,7 +213,7 @@ func consumerLoop(
 				break
 			}
 
-			logger.Warning("failed to obtain channel with messages", lf.Int("identifier", identifier), lf.Err(err))
+			logger.Warning("failed to obtain channel with messages", lf.String("queue_name", queueName), lf.Int("identifier", identifier), lf.Err(err))
 			_ = ch.Close()
 			time.Sleep(retryDelay)
 		}
@@ -226,11 +230,12 @@ func consumerLoop(
 				logger.Debug(
 					"received delivery",
 					lf.Int("identifier", identifier),
+					lf.String("queue_name", queueName),
 					lf.String("routing_key", msg.RoutingKey),
 					lf.String("message_id", msg.MessageId),
 				)
 
-				handleMessageWithAck(msg, callback, logger)
+				handleMessageWithAck(msg, queueName, callback, logger)
 			case <-stop:
 				_ = ch.Close()
 				return
@@ -248,7 +253,6 @@ func (c *Client) Stream(
 	numConsumers int,
 	callback func(context.Context, amqp091.Delivery) error,
 ) {
-
 	allReady := make([]chan struct{}, 0, numConsumers)
 	allClose := make([]chan struct{}, 0, numConsumers)
 
@@ -269,6 +273,16 @@ func (c *Client) Stream(
 	// All consumers are ready
 	close(ready)
 
+	c.activeQueuesMutex.Lock()
+	c.activeQueues[queue] = struct{}{}
+	c.activeQueuesMutex.Unlock()
+
+	defer func() {
+		c.activeQueuesMutex.Lock()
+		delete(c.activeQueues, queue)
+		c.activeQueuesMutex.Unlock()
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -283,6 +297,7 @@ func (c *Client) Stream(
 // handleMessageWithAck wraps the callback to handle ACK/NACK
 func handleMessageWithAck(
 	msg amqp091.Delivery,
+	queueName string,
 	callback func(context.Context, amqp091.Delivery) error,
 	logger xlog.Logger,
 ) {
@@ -290,6 +305,10 @@ func handleMessageWithAck(
 		if r := recover(); r != nil {
 			logger.Error(
 				"panic occurred while treating delivery",
+				lf.String("message_id", msg.MessageId),
+				lf.String("queue_name", queueName),
+				lf.String("routing_key", msg.RoutingKey),
+
 				lf.Any("panic", r),
 			)
 			// If callback panics, NACK the message
@@ -297,6 +316,9 @@ func handleMessageWithAck(
 			if err != nil {
 				logger.Warning(
 					"failed to nack message",
+					lf.String("message_id", msg.MessageId),
+					lf.String("queue_name", queueName),
+					lf.String("routing_key", msg.RoutingKey),
 					lf.Err(err),
 				)
 			}
@@ -306,11 +328,17 @@ func handleMessageWithAck(
 	if err := callback(context.TODO(), msg); err != nil {
 		logger.Warning(
 			"failed to treat delivery",
+			lf.String("message_id", msg.MessageId),
+			lf.String("queue_name", queueName),
+			lf.String("routing_key", msg.RoutingKey),
 			lf.Err(err),
 		)
 		if err := msg.Nack(false, true); err != nil {
 			logger.Warning(
 				"failed to nack message",
+				lf.String("message_id", msg.MessageId),
+				lf.String("queue_name", queueName),
+				lf.String("routing_key", msg.RoutingKey),
 				lf.Err(err),
 			)
 		}
@@ -320,6 +348,9 @@ func handleMessageWithAck(
 	if err := msg.Ack(false); err != nil {
 		logger.Warning(
 			"failed to ack message",
+			lf.String("message_id", msg.MessageId),
+			lf.String("queue_name", queueName),
+			lf.String("routing_key", msg.RoutingKey),
 			lf.Err(err),
 		)
 	}

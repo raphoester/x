@@ -63,3 +63,7 @@ func Err(value error) Field {
 	}
 	return Field{key: "error", value: str}
 }
+
+func Strings(key string, value []string) Field {
+	return Field{key: key, value: value}
+}

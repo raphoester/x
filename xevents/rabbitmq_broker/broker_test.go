@@ -29,7 +29,9 @@ func (s *testSuite) SetupSuite() {
 	rabbitMQ, err := xdockertest.NewRabbitMQ(xlog.NewTestLogger(s.T()))
 	s.Require().NoError(err)
 	s.rabbitMQ = rabbitMQ
-	s.broker, err = rabbitmq_broker.New(rabbitMQ.RabbitMQ)
+
+	s.broker, err = rabbitmq_broker.New(rabbitMQ.RabbitMQ, xlog.NewTestLogger(s.T()))
+	s.Require().NoError(err)
 }
 
 func (s *testSuite) TearDownSuite() {
@@ -40,6 +42,9 @@ func (s *testSuite) TearDownSuite() {
 
 func (s *testSuite) SetupTest() {
 	_ = s.rabbitMQ.Clean()
+	var err error
+	s.broker, err = rabbitmq_broker.New(s.rabbitMQ.RabbitMQ, xlog.NewTestLogger(s.T()))
+	s.Require().NoError(err)
 }
 
 func (s *testSuite) TestPublish() {
@@ -62,13 +67,14 @@ func (s *testSuite) TestPublish() {
 	listenCtx, cancelListen := context.WithCancel(context.Background())
 	defer cancelListen()
 
-	ready, err := s.broker.Listen(
+	err := s.broker.Listen(
 		listenCtx,
+		"test",
 		[]string{customTopicName},
-		rabbitmq_broker.HandlerPair{
+		xevents.HandlerPair{
 			Topic: customTopicName, // route the event to its own handler through its topic name
-			Handler: rabbitmq_broker.UnmarshalHelper(
-				func(ctx context.Context, event xevents.Event, payload xevents.ExamplePayload) error {
+			Handler: xevents.UnmarshalHelper(
+				func(ctx context.Context, event *xevents.Event, payload *xevents.ExamplePayload) error {
 					ran = true
 					retrievedValue = payload.Key
 					retrievedEventData = event.Data()
@@ -80,17 +86,15 @@ func (s *testSuite) TestPublish() {
 	)
 	s.Require().NoError(err)
 
-	<-ready
-
 	valueShouldBe := "value"
-	err = s.broker.Publish(
-		context.Background(), xevents.New(
-			timeProvider,
-			idGenerator,
-			xevents.ExamplePayload{Key: "value"}.
-				WithTopic(customTopicName),
-		),
+
+	event, err := xevents.New(
+		timeProvider,
+		idGenerator,
+		xevents.ExamplePayload{Key: "value"}.WithTopic(customTopicName),
 	)
+	s.Require().NoError(err)
+	err = s.broker.Publish(context.Background(), event)
 	s.Require().NoError(err)
 
 	iterations := 10
@@ -122,12 +126,12 @@ func (s *testSuite) TestStreamOnlyAPartOfThePublishedEvents() {
 	}
 
 	retrievedKeysSet := map[string]struct{}{}
-	pairs := make([]rabbitmq_broker.HandlerPair, 0, eventsSentCount)
+	pairs := make([]xevents.HandlerPair, 0, eventsSentCount)
 	for key := range expectedKeysSet {
-		pairs = append(pairs, rabbitmq_broker.HandlerPair{
+		pairs = append(pairs, xevents.HandlerPair{
 			Topic: key,
-			Handler: rabbitmq_broker.UnmarshalHelper(
-				func(ctx context.Context, event xevents.Event, payload xevents.ExamplePayload) error {
+			Handler: xevents.UnmarshalHelper(
+				func(ctx context.Context, event *xevents.Event, payload xevents.ExamplePayload) error {
 					ranCounter++
 					retrievedKeysSet[payload.Key] = struct{}{}
 					return nil
@@ -139,26 +143,24 @@ func (s *testSuite) TestStreamOnlyAPartOfThePublishedEvents() {
 	// need to cancel the listener context to stop the test at the end
 	listenCtx, cancelListen := context.WithCancel(context.Background())
 	defer cancelListen()
-	ready, err := s.broker.Listen(listenCtx, []string{"topic.*"}, pairs...)
+	err := s.broker.Listen(listenCtx, "test", []string{"topic.*"}, pairs...)
 	s.Assert().NoError(err)
-
-	<-ready
 
 	for key := range expectedKeysSet {
 		expectedKeysSet[key] = struct{}{}
-		err := s.broker.Publish(context.Background(),
-			xevents.New(timeProvider, idGenerator, xevents.ExamplePayload{Key: key}.WithTopic(key)))
+		event, err := xevents.New(timeProvider, idGenerator, xevents.ExamplePayload{Key: key}.WithTopic(key))
+		s.Require().NoError(err)
+		err = s.broker.Publish(context.Background(), event)
 		s.Require().NoError(err)
 	}
 
-	err = s.broker.Publish(
-		context.Background(),
-		xevents.New(
-			timeProvider,
-			idGenerator,
-			xevents.ExamplePayload{Key: "value"}.WithTopic("xyz.not.matching.topic.name"),
-		),
+	event, err := xevents.New(
+		timeProvider,
+		idGenerator,
+		xevents.ExamplePayload{Key: "value"}.WithTopic("xyz.not.matching.topic.name"),
 	)
+	s.Require().NoError(err)
+	err = s.broker.Publish(context.Background(), event)
 	s.Require().NoError(err)
 
 	retriesCount := 10
@@ -176,25 +178,22 @@ func (s *testSuite) TestStreamOnlyAPartOfThePublishedEvents() {
 }
 
 func (s *testSuite) TestListenTwice() {
-
-	ready1, err := s.broker.Listen(context.Background(), []string{"topic1"}, rabbitmq_broker.HandlerPair{
+	err := s.broker.Listen(context.Background(), "test", []string{"topic1"}, xevents.HandlerPair{
 		Topic: "topic1",
-		Handler: func(ctx context.Context, event xevents.Event) error {
+		Handler: func(ctx context.Context, event *xevents.Event) error {
 			return nil
 		},
 	})
 	s.Assert().NoError(err)
-	<-ready1
 
-	ready2, err := s.broker.Listen(context.Background(), []string{"topic2"}, rabbitmq_broker.HandlerPair{
+	err = s.broker.Listen(context.Background(), "test", []string{"topic2"}, xevents.HandlerPair{
 		Topic: "topic2",
-		Handler: func(ctx context.Context, event xevents.Event) error {
+		Handler: func(ctx context.Context, event *xevents.Event) error {
 			return nil
 		},
 	})
 	s.Assert().NoError(err)
 
-	<-ready2
 }
 
 func (s *testSuite) TestListenOnMultipleKeys() {
@@ -203,42 +202,46 @@ func (s *testSuite) TestListenOnMultipleKeys() {
 	ranTopicB := false
 	ranTopicC := false
 
-	ready, err := s.broker.Listen(context.Background(), []string{"topic.a.*", "topic.b.*"}, rabbitmq_broker.HandlerPair{
+	err := s.broker.Listen(context.Background(), "test", []string{"topic.a.*", "topic.b.*"}, xevents.HandlerPair{
 		Topic: "topic.a.test",
-		Handler: func(ctx context.Context, event xevents.Event) error {
+		Handler: func(ctx context.Context, event *xevents.Event) error {
 			ranTopicA = true
 			return nil
 		},
-	}, rabbitmq_broker.HandlerPair{
+	}, xevents.HandlerPair{
 		Topic: "topic.b.test",
-		Handler: func(ctx context.Context, event xevents.Event) error {
+		Handler: func(ctx context.Context, event *xevents.Event) error {
 			ranTopicB = true
 			return nil
 		},
-	}, rabbitmq_broker.HandlerPair{ // this one should not be called
+	}, xevents.HandlerPair{ // this one should not be called
 		Topic: "topic.c.test",
-		Handler: func(ctx context.Context, event xevents.Event) error {
+		Handler: func(ctx context.Context, event *xevents.Event) error {
 			ranTopicC = true
 			return nil
 		},
 	})
 	s.Assert().NoError(err)
 
-	<-ready
+	makeEvent := func(key, topic string) *xevents.Event {
+		event, err := xevents.New(xtime.NewDefaultFixedProvider(), xid.RandomGenerator{}, xevents.ExamplePayload{Key: key}.WithTopic(topic))
+		s.Require().NoError(err)
+		return event
+	}
 
 	err = s.broker.Publish(
 		context.Background(),
-		xevents.New(xtime.NewDefaultFixedProvider(), xid.RandomGenerator{}, xevents.ExamplePayload{Key: "a"}.WithTopic("topic.a.test")))
+		makeEvent("a", "topic.a.test"))
 	s.Require().NoError(err)
 
 	err = s.broker.Publish(
 		context.Background(),
-		xevents.New(xtime.NewDefaultFixedProvider(), xid.RandomGenerator{}, xevents.ExamplePayload{Key: "a"}.WithTopic("topic.b.test")))
+		makeEvent("b", "topic.b.test"))
 	s.Require().NoError(err)
 
 	err = s.broker.Publish(
 		context.Background(),
-		xevents.New(xtime.NewDefaultFixedProvider(), xid.RandomGenerator{}, xevents.ExamplePayload{Key: "a"}.WithTopic("topic.c.test")))
+		makeEvent("c", "topic.c.test"))
 	s.Require().NoError(err)
 
 	iterations := 10
